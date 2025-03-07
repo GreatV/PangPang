@@ -5,14 +5,11 @@ from sqlalchemy.orm import sessionmaker
 from papers_with_code import Paper, Base
 from openai import OpenAI
 from typing import List
-import logging
+from logger_config import get_logger
 from dotenv import load_dotenv
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
+# Get logger for the current module
+logger = get_logger(__name__)
 
 
 def get_random_papers(session, limit: int = 20) -> List[Paper]:

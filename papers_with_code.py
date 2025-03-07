@@ -4,14 +4,11 @@ import re
 from sqlalchemy import create_engine, Column, String, Integer, UniqueConstraint, Boolean
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.exc import IntegrityError
-import logging
+from logger_config import get_logger
 import time
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
+# Get logger for the current module
+logger = get_logger(__name__)
 
 Base = declarative_base()
 

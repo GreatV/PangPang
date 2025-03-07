@@ -1,0 +1,7 @@
+requests
+beautifulsoup4
+sqlalchemy
+openai
+python-dotenv
+pyyaml
+loguru

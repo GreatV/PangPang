@@ -196,6 +196,12 @@ def process_paper(paper_info):
         # Get converter from config
         converter = config.get("pdf_to_markdown", {}).get("converter", "mistral_ocr")
 
+        # Create a unique directory for this paper's images
+        date = datetime.now().strftime("%Y-%m-%d")
+        paper_id = paper_info.id
+        image_dir = f"images_{paper_id}_{date}"
+        os.makedirs(os.path.join(output_dir, image_dir), exist_ok=True)
+        
         if converter == "doc2x":
             logger.info("Using doc2x for PDF to Markdown conversion")
             convert_to_markdown_doc2x(latest_pdf)
@@ -220,14 +226,71 @@ def process_paper(paper_info):
             try:
                 with open("result.json", "r", encoding="utf-8") as f:
                     ocr_response = json.load(f)
-                # Concatenate all markdown content from Mistral OCR pages
-                content = "".join(
-                    page["markdown"]
-                    for page in ocr_response["pages"]
-                    if page["markdown"]
-                )
+                
+                content = ""
+                image_refs = set()  # Track image references to avoid duplicates
+                
+                # Process each page in the OCR response
+                for page in ocr_response["pages"]:
+                    if not page.get("markdown"):
+                        continue
+                    
+                    page_content = page["markdown"]
+                    
+                    # Process images in this page
+                    for img in page.get("images", []):
+                        img_id = img["id"]
+                        if img_id in image_refs:
+                            continue  # Skip duplicate image references
+                        
+                        # Create a more descriptive filename for the image
+                        img_filename = os.path.join(output_dir, image_dir, img_id)
+                        
+                        # Check if we have base64 encoded image data
+                        if img.get("image_base64"):
+                            import base64
+                            # Decode and save the base64 image data
+                            try:
+                                # Remove the data:image/jpeg;base64, prefix
+                                image_base64 = img["image_base64"].replace("data:image/jpeg;base64,", "")
+                                img_data = base64.b64decode(image_base64)
+                                with open(img_filename, "wb") as img_file:
+                                    img_file.write(img_data)
+                                logger.info(f"Saved base64 image to: {img_filename}")
+                            except Exception as e:
+                                logger.error(f"Error saving base64 image: {str(e)}")
+                                continue
+                        else:
+                            # Get the image file from the PDF processing output directory
+                            source_path = img_id
+                            if os.path.exists(source_path):
+                                # Copy the image to our paper-specific directory
+                                import shutil
+                                shutil.copy2(source_path, img_filename)
+                                logger.info(f"Copied image from {source_path} to {img_filename}")
+                            else:
+                                logger.warning(f"Image file not found: {source_path}")
+                                continue
+                        
+                        # Update image references in the markdown to point to our copied images
+                        page_content = page_content.replace(
+                            f"![{img_id}]({img_id})", 
+                            f"![Figure from paper]({img_filename})"
+                        )
+                        
+                        image_refs.add(img_id)
+                        logger.info(f"Processed image: {img_id}")
+                    
+                    content += page_content
+                
+                if not content:
+                    logger.error("No content extracted from OCR response")
+                    return None
+                    
             except Exception as e:
                 logger.error(f"Error processing Mistral OCR output: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
                 return None
 
         # Prefer arXiv link in the following order:
@@ -253,7 +316,6 @@ def process_paper(paper_info):
         summary = summarize_paper(content)
 
         # Save summary
-        date = datetime.now().strftime("%Y-%m-%d")
         filename = f"summary_{paper_info.id}_{date}.md"
         with open(filename, "w", encoding="utf-8") as f:
             f.write(summary)
@@ -263,6 +325,8 @@ def process_paper(paper_info):
 
     except Exception as e:
         logger.error(f"Error downloading PDF: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
 
     return None
 
@@ -275,6 +339,10 @@ def write_digest_report(summary_files):
 
     date = datetime.now().strftime("%Y-%m-%d")
     output_file = f"paper_digest_{date}.md"
+    
+    # Create a directory for the digest images
+    digest_image_dir = f"digest_images_{date}"
+    os.makedirs(digest_image_dir, exist_ok=True)
 
     try:
         with open(output_file, "w", encoding="utf-8") as report:
@@ -285,15 +353,44 @@ def write_digest_report(summary_files):
                     with open(summary_file, "r", encoding="utf-8") as f:
                         summary_content = f.read()
 
+                    # Extract paper ID from the summary filename (format: summary_ID_DATE.md)
+                    paper_id = summary_file.split('_')[1]
+                    image_dir = f"images_{paper_id}_{date}"
+                    
+                    # Copy images to the digest images directory and update references
+                    if os.path.exists(image_dir):
+                        logger.info(f"Processing images from directory: {image_dir}")
+                        
+                        # Copy each image to the digest images directory and update references
+                        import shutil
+                        for img_file in os.listdir(image_dir):
+                            # Source and destination paths
+                            source_path = f"{image_dir}/{img_file}"
+                            dest_path = f"{digest_image_dir}/{paper_id}_{img_file}"
+                            
+                            # Copy the image
+                            shutil.copy2(source_path, dest_path)
+                            
+                            # Update the image reference in the summary
+                            summary_content = summary_content.replace(
+                                f"({source_path})", 
+                                f"({dest_path})"
+                            )
+                            logger.info(f"Copied image: {source_path} -> {dest_path}")
+
                     report.write(summary_content)
                     report.write("\n\n---\n\n")  # Separator
                 except Exception as e:
                     logger.error(f"Error reading summary file {summary_file}: {str(e)}")
+                    import traceback
+                    logger.error(traceback.format_exc())
 
         logger.info(f"Summary report generated: {output_file}")
         return True
     except Exception as e:
         logger.error(f"Error creating digest report: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
 
 

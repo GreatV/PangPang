@@ -27,6 +27,7 @@ def convert_to_markdown(pdf_filename):
             "type": "document_url",
             "document_url": signed_url.url,
         },
+        include_image_base64=True,
     )
 
     content = json.loads(ocr_response.model_dump_json())

@@ -24,6 +24,7 @@ class Paper(Base):
     paper_link = Column(String)
     paper_download = Column(String)
     code_link = Column(String)
+    arxiv_link = Column(String)
     thoroughly_read = Column(Boolean, default=False)
 
     # Add composite unique constraint
@@ -51,11 +52,20 @@ def parse_paper_card(card):
     # Extract paper and code links
     paper_download = ""
     code_link = ""
+    arxiv_link = ""
+
     for link in card.find_all("a", {"class": "badge"}):
         if "Paper" in link.text:
             paper_download = "https://paperswithcode.com" + link["href"]
         elif "Code" in link.text:
             code_link = "https://paperswithcode.com" + link["href"]
+
+    # Try to find arXiv link directly in main page
+    for link in card.find_all("a"):
+        href = link.get("href", "")
+        if "arxiv.org" in href:
+            arxiv_link = href
+            break
 
     return {
         "title": title,
@@ -65,6 +75,7 @@ def parse_paper_card(card):
         "paper_link": paper_link,
         "paper_download": paper_download,
         "code_link": code_link,
+        "arxiv_link": arxiv_link,
     }
 
 
@@ -117,53 +128,50 @@ def scrape_papers_with_pagination(base_url, target_count=None, max_pages=100):
     return all_papers[:target_count] if target_count else all_papers
 
 
-def save_papers_to_db(papers, session, batch_size=50):
+def save_papers_to_db(papers, session):
     new_count = 0
     updated_count = 0
-    batch = []
-
-    # Prevent premature autoflush
-    session.expire_all()
 
     for paper_info in papers:
-        paper_info["stars"] = int(paper_info["stars"])
+        title = paper_info["title"]
+        paper_link = paper_info["paper_link"]
 
-        try:
-            # Try to find existing paper by title only
-            existing_paper = (
-                session.query(Paper).filter_by(title=paper_info["title"]).first()
-            )
+        # Look for existing paper in the database by title and paper link
+        paper = session.query(Paper).filter_by(title=title).first()
 
-            if existing_paper:
-                # Update existing paper if needed
-                was_updated = False
-                for key, value in paper_info.items():
-                    if getattr(existing_paper, key) != value:
-                        setattr(existing_paper, key, value)
-                        was_updated = True
-                if was_updated:
-                    updated_count += 1
-            else:
-                # Add new paper
-                paper = Paper(**paper_info)
-                batch.append(paper)
+        if paper:
+            # Update existing paper
+            paper.github_link = paper_info["github_link"]
+            paper.abstract = paper_info["abstract"]
+            paper.stars = int(paper_info["stars"])
+            paper.paper_link = paper_link
+            paper.paper_download = paper_info["paper_download"]
+            paper.code_link = paper_info["code_link"]
+            paper.arxiv_link = paper_info.get("arxiv_link", "")
+            updated_count += 1
+        else:
+            # Create new paper
+            try:
+                new_paper = Paper(
+                    title=title,
+                    github_link=paper_info["github_link"],
+                    abstract=paper_info["abstract"],
+                    stars=int(paper_info["stars"]),
+                    paper_link=paper_link,
+                    paper_download=paper_info["paper_download"],
+                    code_link=paper_info["code_link"],
+                    arxiv_link=paper_info.get("arxiv_link", ""),
+                    thoroughly_read=False,
+                )
+                session.add(new_paper)
                 new_count += 1
+            except IntegrityError:
+                session.rollback()
+                logger.warning(f"Paper already exists: {title}")
+                continue
 
-            # Commit in batches
-            if len(batch) >= batch_size:
-                session.add_all(batch)
-                session.commit()
-                batch.clear()
-
-        except IntegrityError:
-            session.rollback()
-            logger.warning(f"Skipping duplicate paper: {paper_info['title'][:50]}...")
-
-    # Final commit if there are remaining papers
-    if batch:
-        session.add_all(batch)
-        session.commit()
-
+    # Commit all changes
+    session.commit()
     return new_count, updated_count
 
 

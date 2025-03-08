@@ -1,0 +1,17 @@
+# Pipeline Configuration
+
+# Paper fetching settings
+paper_fetch:
+  limit: 30  # Number of papers to fetch from the API
+
+# Paper ranking settings
+paper_ranking:
+  default_limit: 3  # Default number of papers to select
+  fallback_limit: 1  # Number of papers to select when no new papers are found 
+
+# PDF to Markdown conversion settings
+pdf_to_markdown:
+  converter: "mistral_ocr"  # Options: "doc2x", "mistral_ocr" 
+
+# Output settings
+output_dir: "./data"  # Directory to save the output files

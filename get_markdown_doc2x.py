@@ -38,15 +38,15 @@ def get_status(uid: str):
     raise Exception(f"get status failed: {data}")
 
 
-def main(file):
+def convert_to_markdown(file):
     upload_data = preupload()
     print(upload_data)
     url, uid = upload_data["url"], upload_data["uid"]
 
     put_file(file, url)
 
-    max_retries = 100
-    for retries in range(max_retries):
+    max_retries = 1000
+    for _ in range(max_retries):
         status_data = get_status(uid)
         status = status_data.get("status")
         if status == "success":
@@ -65,4 +65,4 @@ def main(file):
 
 
 if __name__ == "__main__":
-    main("2501.10822v1.pdf")
+    convert_to_markdown("2501.10822v1.pdf")

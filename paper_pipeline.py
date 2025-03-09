@@ -1,12 +1,13 @@
 import os
 import json
-import yaml  # Add YAML import
+import yaml
 from datetime import datetime
 from contextlib import contextmanager
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 from logger_config import get_logger
+from sm_ms_uploader import SMmsUploader
 
 # Import project modules
 from papers_with_code import (
@@ -21,18 +22,17 @@ from get_markdown_doc2x import convert_to_markdown as convert_to_markdown_doc2x
 from get_markdown_mistral import convert_to_markdown as convert_to_markdown_mistral
 from summarize_paper import summarize_paper
 
-# Get logger for the current module
+# Initialize logger
 logger = get_logger(__name__)
 
 
-# Load configuration
 def load_config():
+    """Load configuration from config.yaml or use defaults if not available"""
     try:
         with open("config.yaml", "r") as config_file:
             return yaml.safe_load(config_file)
     except Exception as e:
         logger.error(f"Error loading config.yaml: {str(e)}")
-        # Return default configuration
         return {
             "paper_fetch": {"limit": 30},
             "paper_ranking": {"default_limit": 3, "fallback_limit": 1},
@@ -45,8 +45,9 @@ def load_config():
 config = load_config()
 
 
-# Simple data class to store paper information
 class PaperInfo:
+    """Data class to store paper information"""
+
     def __init__(
         self, id, title, github_link, paper_link, code_link, stars, arxiv_link=None
     ):
@@ -85,7 +86,7 @@ def setup_database():
 
 
 def fetch_latest_papers(limit=100):
-    """Fetch latest papers and save to database"""
+    """Fetch latest papers from Papers With Code and save to database"""
     logger.info("Starting to fetch latest papers...")
     base_url = "https://paperswithcode.com/latest"
     papers = scrape_papers_with_pagination(base_url, target_count=limit)
@@ -101,7 +102,7 @@ def fetch_latest_papers(limit=100):
 
 
 def rank_and_select_papers(limit=3):
-    """Rank papers and select the top papers, up to the specified limit"""
+    """Rank papers using AI and select the top ones up to the specified limit"""
     logger.info("Starting paper ranking...")
 
     with session_scope() as session:
@@ -113,12 +114,11 @@ def rank_and_select_papers(limit=3):
         prompt = create_prompt(papers)
         ranked_paper_ids = get_chatgpt_ranking(prompt)
 
-        # Check if we got paper IDs
         if not ranked_paper_ids:
             logger.error("Ranking process didn't return any paper IDs")
             return []
 
-        # Ensure we only process valid paper IDs
+        # Process only valid paper IDs up to the limit
         valid_ids = [pid for pid in ranked_paper_ids if isinstance(pid, int)][:limit]
 
         top_papers = []
@@ -127,7 +127,6 @@ def rank_and_select_papers(limit=3):
         for rank, paper_id in enumerate(valid_ids, 1):
             paper = session.query(Paper).filter_by(id=paper_id).first()
             if paper:
-                # Create a PaperInfo object with all necessary data
                 paper_info = PaperInfo(
                     id=paper.id,
                     title=paper.title,
@@ -154,12 +153,11 @@ def get_latest_pdf():
     pdf_files = [f for f in os.listdir(".") if f.endswith(".pdf")]
     if not pdf_files:
         return None
-    # Sort by modification time, get the latest PDF
     return sorted(pdf_files, key=lambda x: os.path.getmtime(x), reverse=True)[0]
 
 
 def process_paper(paper_info):
-    """Process a single paper: download PDF, convert to Markdown, summarize"""
+    """Process a single paper: download PDF, convert to Markdown, summarize and handle images"""
     logger.info(f"Starting to process paper: {paper_info.title}")
 
     # Use arXiv link if available, otherwise use paper_link
@@ -167,7 +165,6 @@ def process_paper(paper_info):
         paper_info.arxiv_link if paper_info.arxiv_link else paper_info.paper_link
     )
 
-    # Download PDF
     if not paper_url:
         logger.error("Paper has no available PDF link")
         return None
@@ -177,11 +174,11 @@ def process_paper(paper_info):
         output_dir = config.get("output_dir", "./data")
         download_result = download_pdf(paper_url, output_file_dir=output_dir)
 
-        # Unpack results - now returns (filename, arxiv_url)
+        # Unpack results - returns (filename, arxiv_url)
         if isinstance(download_result, tuple) and len(download_result) == 2:
             latest_pdf, arxiv_url = download_result
         else:
-            # Backward compatibility with old version
+            # Backward compatibility
             latest_pdf = download_result
             arxiv_url = None
 
@@ -190,29 +187,37 @@ def process_paper(paper_info):
             return None
 
         latest_pdf = os.path.join(output_dir, latest_pdf)
-        # Convert to Markdown based on configuration
         logger.info(f"Converting PDF to Markdown: {latest_pdf}")
 
         # Get converter from config
         converter = config.get("pdf_to_markdown", {}).get("converter", "mistral_ocr")
 
-        # Create a unique directory for this paper's images
+        # Create directory for paper images
         date = datetime.now().strftime("%Y-%m-%d")
         paper_id = paper_info.id
         image_dir = f"images_{paper_id}_{date}"
         os.makedirs(os.path.join(output_dir, image_dir), exist_ok=True)
-        
+
+        # Initialize image hosting service
+        try:
+            smms_uploader = SMmsUploader()
+            logger.info("Initialized SM.MS uploader")
+        except Exception as e:
+            logger.error(f"Failed to initialize SM.MS uploader: {str(e)}")
+            smms_uploader = None
+
+        # Track image URLs for local to online path mapping
+        image_url_map = {}
+
         if converter == "doc2x":
             logger.info("Using doc2x for PDF to Markdown conversion")
             convert_to_markdown_doc2x(latest_pdf)
 
-            # Extract content from result.json for doc2x
             try:
                 with open("result.json", "r", encoding="utf-8") as f:
                     data = json.load(f)
                     pages_info = data["pages"]
 
-                # Concatenate all markdown content
                 content = "".join(page["md"] for page in pages_info)
             except Exception as e:
                 logger.error(f"Error processing doc2x output: {str(e)}")
@@ -222,84 +227,117 @@ def process_paper(paper_info):
             logger.info("Using Mistral OCR for PDF to Markdown conversion")
             convert_to_markdown_mistral(latest_pdf)
 
-            # Process Mistral OCR response
             try:
                 with open("result.json", "r", encoding="utf-8") as f:
                     ocr_response = json.load(f)
-                
+
                 content = ""
                 image_refs = set()  # Track image references to avoid duplicates
-                
+
                 # Process each page in the OCR response
                 for page in ocr_response["pages"]:
                     if not page.get("markdown"):
                         continue
-                    
+
                     page_content = page["markdown"]
-                    
+
                     # Process images in this page
                     for img in page.get("images", []):
                         img_id = img["id"]
                         if img_id in image_refs:
                             continue  # Skip duplicate image references
-                        
-                        # Create a more descriptive filename for the image
+
+                        # Create descriptive filename for the image
                         img_filename = os.path.join(output_dir, image_dir, img_id)
-                        
-                        # Check if we have base64 encoded image data
+
+                        # Handle base64 encoded images
                         if img.get("image_base64"):
                             import base64
-                            # Decode and save the base64 image data
+
                             try:
                                 # Remove the data:image/jpeg;base64, prefix
-                                image_base64 = img["image_base64"].replace("data:image/jpeg;base64,", "")
+                                image_base64 = img["image_base64"].replace(
+                                    "data:image/jpeg;base64,", ""
+                                )
                                 img_data = base64.b64decode(image_base64)
                                 with open(img_filename, "wb") as img_file:
                                     img_file.write(img_data)
                                 logger.info(f"Saved base64 image to: {img_filename}")
+
+                                # Upload to image hosting service if available
+                                if smms_uploader:
+                                    try:
+                                        response = smms_uploader.upload_image(
+                                            img_filename
+                                        )
+                                        image_url = response["data"]["url"]
+                                        image_url_map[img_filename] = image_url
+                                        logger.info(
+                                            f"Uploaded image to SM.MS: {image_url}"
+                                        )
+                                    except Exception as e:
+                                        logger.error(
+                                            f"Failed to upload image to SM.MS: {str(e)}"
+                                        )
                             except Exception as e:
                                 logger.error(f"Error saving base64 image: {str(e)}")
                                 continue
                         else:
-                            # Get the image file from the PDF processing output directory
+                            # Handle file-based images
                             source_path = img_id
                             if os.path.exists(source_path):
-                                # Copy the image to our paper-specific directory
                                 import shutil
+
                                 shutil.copy2(source_path, img_filename)
-                                logger.info(f"Copied image from {source_path} to {img_filename}")
+                                logger.info(
+                                    f"Copied image from {source_path} to {img_filename}"
+                                )
+
+                                # Upload to image hosting service if available
+                                if smms_uploader:
+                                    try:
+                                        response = smms_uploader.upload_image(
+                                            img_filename
+                                        )
+                                        image_url = response["data"]["url"]
+                                        image_url_map[img_filename] = image_url
+                                        logger.info(
+                                            f"Uploaded image to SM.MS: {image_url}"
+                                        )
+                                    except Exception as e:
+                                        logger.error(
+                                            f"Failed to upload image to SM.MS: {str(e)}"
+                                        )
                             else:
                                 logger.warning(f"Image file not found: {source_path}")
                                 continue
-                        
-                        # Update image references in the markdown to point to our copied images
+
+                        # Update image references in the markdown
                         page_content = page_content.replace(
-                            f"![{img_id}]({img_id})", 
-                            f"![Figure from paper]({img_filename})"
+                            f"![{img_id}]({img_id})",
+                            f"![Figure from paper]({img_filename})",
                         )
-                        
+
                         image_refs.add(img_id)
                         logger.info(f"Processed image: {img_id}")
-                    
+
                     content += page_content
-                
+
                 if not content:
                     logger.error("No content extracted from OCR response")
                     return None
-                    
+
             except Exception as e:
                 logger.error(f"Error processing Mistral OCR output: {str(e)}")
                 import traceback
+
                 logger.error(traceback.format_exc())
                 return None
 
-        # Prefer arXiv link in the following order:
-        # 1. arXiv URL from download
-        # 2. arXiv link from database
-        # 3. Original paper link
+        # Select best available paper link
         paper_link_to_use = arxiv_url or paper_info.arxiv_link or paper_info.paper_link
 
-        # Add paper metadata
+        # Add paper metadata to content
         paper_metadata = f"""
 # {paper_info.title}
 
@@ -312,13 +350,73 @@ def process_paper(paper_info):
 """
         content = paper_metadata + content
 
-        # Call summarize function
+        # Generate AI summary
         summary = summarize_paper(content)
 
-        # Save summary
+        # Replace local image paths with online URLs
+        processed_summary = summary
+
+        # Enhanced replacement logic to handle different path formats
+        def normalize_path(path):
+            """Normalize path by removing leading './' and ensuring consistent format"""
+            return path.lstrip("./")
+
+        # Create a map with multiple path variants for each image
+        enhanced_image_map = {}
+        for local_path, online_url in image_url_map.items():
+            # Original path
+            enhanced_image_map[local_path] = online_url
+
+            # Path without leading ./
+            normalized_path = normalize_path(local_path)
+            if normalized_path != local_path:
+                enhanced_image_map[normalized_path] = online_url
+
+            # Path with leading ./ if not present
+            if not local_path.startswith("./"):
+                enhanced_image_map[f"./{local_path}"] = online_url
+
+            # Log all path variants
+            logger.info(f"Image path variants for {local_path} -> {online_url}:")
+            for variant in enhanced_image_map.keys():
+                if enhanced_image_map[variant] == online_url:
+                    logger.info(f"  - {variant}")
+
+        # Perform multiple passes of replacement to ensure all variants are caught
+        for local_path, online_url in enhanced_image_map.items():
+            logger.info(
+                f"Replacing local image path with online URL: {local_path} -> {online_url}"
+            )
+            processed_summary = processed_summary.replace(local_path, online_url)
+
+        # Additional pass using regex to catch paths with different directory structures
+        import re
+
+        for local_path, online_url in image_url_map.items():
+            # Extract the image filename from the path
+            filename = os.path.basename(local_path)
+            # Create a pattern that matches the filename in various directory structures
+            pattern = re.escape(filename)
+            # Find all matches of the filename in the summary
+            for match in re.finditer(
+                f"(\\./)?(?:data/)?images_[^/]+/{pattern}", processed_summary
+            ):
+                matched_path = match.group(0)
+                if (
+                    matched_path in processed_summary
+                    and matched_path not in enhanced_image_map
+                ):
+                    logger.info(
+                        f"Regex replacing path variant: {matched_path} -> {online_url}"
+                    )
+                    processed_summary = processed_summary.replace(
+                        matched_path, online_url
+                    )
+
+        # Save summary to file
         filename = f"summary_{paper_info.id}_{date}.md"
         with open(filename, "w", encoding="utf-8") as f:
-            f.write(summary)
+            f.write(processed_summary)
 
         logger.info(f"Paper summary saved to: {filename}")
         return filename
@@ -326,79 +424,17 @@ def process_paper(paper_info):
     except Exception as e:
         logger.error(f"Error downloading PDF: {str(e)}")
         import traceback
+
         logger.error(traceback.format_exc())
 
     return None
 
 
-def write_digest_report(summary_files):
-    """Generate a summary report from the processed papers"""
-    if not summary_files:
-        logger.info("No paper summaries were generated, pipeline complete")
-        return False
-
-    date = datetime.now().strftime("%Y-%m-%d")
-    output_file = f"paper_digest_{date}.md"
-    
-    # Create a directory for the digest images
-    digest_image_dir = f"digest_images_{date}"
-    os.makedirs(digest_image_dir, exist_ok=True)
-
-    try:
-        with open(output_file, "w", encoding="utf-8") as report:
-            report.write(f"# Paper Digest Summary - {date}\n\n")
-
-            for summary_file in summary_files:
-                try:
-                    with open(summary_file, "r", encoding="utf-8") as f:
-                        summary_content = f.read()
-
-                    # Extract paper ID from the summary filename (format: summary_ID_DATE.md)
-                    paper_id = summary_file.split('_')[1]
-                    image_dir = f"images_{paper_id}_{date}"
-                    
-                    # Copy images to the digest images directory and update references
-                    if os.path.exists(image_dir):
-                        logger.info(f"Processing images from directory: {image_dir}")
-                        
-                        # Copy each image to the digest images directory and update references
-                        import shutil
-                        for img_file in os.listdir(image_dir):
-                            # Source and destination paths
-                            source_path = f"{image_dir}/{img_file}"
-                            dest_path = f"{digest_image_dir}/{paper_id}_{img_file}"
-                            
-                            # Copy the image
-                            shutil.copy2(source_path, dest_path)
-                            
-                            # Update the image reference in the summary
-                            summary_content = summary_content.replace(
-                                f"({source_path})", 
-                                f"({dest_path})"
-                            )
-                            logger.info(f"Copied image: {source_path} -> {dest_path}")
-
-                    report.write(summary_content)
-                    report.write("\n\n---\n\n")  # Separator
-                except Exception as e:
-                    logger.error(f"Error reading summary file {summary_file}: {str(e)}")
-                    import traceback
-                    logger.error(traceback.format_exc())
-
-        logger.info(f"Summary report generated: {output_file}")
-        return True
-    except Exception as e:
-        logger.error(f"Error creating digest report: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return False
-
-
 def main():
-    """Main pipeline function"""
+    """Main pipeline function that orchestrates the paper processing workflow"""
     load_dotenv()  # Load environment variables
 
-    # Load configuration from YAML file
+    # Load configuration
     config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     try:
         with open(config_path, "r", encoding="utf-8") as config_file:
@@ -452,8 +488,7 @@ def main():
         summary_file for paper in top_papers if (summary_file := process_paper(paper))
     ]
 
-    # Step 4: Generate summary report
-    write_digest_report(summary_files)
+    logger.info(f"Total summary files generated: {len(summary_files)}")
 
 
 if __name__ == "__main__":
